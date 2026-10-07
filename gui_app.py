@@ -101,6 +101,7 @@ class TurboDownloaderApp(ctk.CTk):
         # Mapeo de opciones del menú a selectores reales de formato
         self.format_height_map = {}
         self.current_video_title = ""
+        self.video_duration_seconds = None
 
         self._build_ui()
         self._check_environment()
@@ -319,6 +320,79 @@ class TurboDownloaderApp(ctk.CTk):
         )
         self.open_dir_btn.pack(side="left")
 
+        # Fila 3: Recorte de Fragmento de Tiempo (Time-Range Clipper)
+        self.clip_frame = ctk.CTkFrame(self.options_frame, fg_color="transparent")
+        self.clip_frame.pack(fill="x", padx=14, pady=(0, 10))
+
+        self.clip_var = ctk.BooleanVar(value=self.config.get("clip_enabled", False))
+        self.clip_switch = ctk.CTkSwitch(
+            self.clip_frame,
+            text="✂️ Descargar solo un fragmento de tiempo (Recorte rápido)",
+            variable=self.clip_var,
+            command=self._toggle_clip_panel,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.clip_switch.pack(anchor="w", pady=(0, 4))
+
+        # Panel de controles de tiempo
+        self.clip_panel = ctk.CTkFrame(self.clip_frame, fg_color=("#e2e8f0", "#1e293b"), corner_radius=8)
+
+        # Subfila 1: Entradas Desde / Hasta + Duración
+        self.clip_inputs_row = ctk.CTkFrame(self.clip_panel, fg_color="transparent")
+        self.clip_inputs_row.pack(fill="x", padx=10, pady=(8, 4))
+
+        ctk.CTkLabel(self.clip_inputs_row, text="Desde:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 4))
+        self.clip_start_entry = ctk.CTkEntry(self.clip_inputs_row, width=85, height=30, font=ctk.CTkFont(family="Consolas", size=12))
+        self.clip_start_entry.insert(0, self.config.get("clip_start", "00:00:00"))
+        self.clip_start_entry.pack(side="left", padx=(0, 12))
+        self.clip_start_entry.bind("<KeyRelease>", lambda e: self._on_clip_time_changed())
+
+        ctk.CTkLabel(self.clip_inputs_row, text="Hasta:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 4))
+        self.clip_end_entry = ctk.CTkEntry(self.clip_inputs_row, width=85, height=30, font=ctk.CTkFont(family="Consolas", size=12))
+        self.clip_end_entry.insert(0, self.config.get("clip_end", "00:01:00"))
+        self.clip_end_entry.pack(side="left", padx=(0, 14))
+        self.clip_end_entry.bind("<KeyRelease>", lambda e: self._on_clip_time_changed())
+
+        self.clip_duration_label = ctk.CTkLabel(
+            self.clip_inputs_row,
+            text="Duración: 1 min 00 s",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#38bdf8"
+        )
+        self.clip_duration_label.pack(side="left", padx=(0, 10))
+
+        # Subfila 2: Botones de Ajuste Rápido (Presets)
+        self.clip_presets_row = ctk.CTkFrame(self.clip_panel, fg_color="transparent")
+        self.clip_presets_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(self.clip_presets_row, text="Ajustes rápidos:", font=ctk.CTkFont(size=11), text_color="#94a3b8").pack(side="left", padx=(0, 6))
+
+        presets = [
+            ("1 min", "00:00:00", "00:01:00"),
+            ("2 min", "00:00:00", "00:02:00"),
+            ("5 min", "00:00:00", "00:05:00"),
+            ("15 min", "00:00:00", "00:15:00"),
+            ("1 hora", "00:00:00", "01:00:00"),
+            ("3 horas", "00:00:00", "03:00:00"),
+            ("8 horas", "00:00:00", "08:00:00"),
+        ]
+        for name, s_val, e_val in presets:
+            btn = ctk.CTkButton(
+                self.clip_presets_row,
+                text=name,
+                width=55,
+                height=24,
+                font=ctk.CTkFont(size=10, weight="bold"),
+                fg_color="#374151",
+                hover_color="#4b5563",
+                command=lambda s=s_val, e=e_val: self._apply_clip_preset(s, e)
+            )
+            btn.pack(side="left", padx=2)
+
+        if self.clip_var.get():
+            self.clip_panel.pack(fill="x", padx=4, pady=(4, 0))
+            self._on_clip_time_changed()
+
         # 4. BARRA DE PROGRESO Y ACCIONES
         self.action_frame = ctk.CTkFrame(self, corner_radius=10)
         self.action_frame.pack(fill="x", padx=16, pady=6)
@@ -468,13 +542,108 @@ class TurboDownloaderApp(ctk.CTk):
                 "no_playlist": self.no_playlist_var.get() if hasattr(self, "no_playlist_var") else True,
                 "theme": "Dark" if (hasattr(self, "theme_switch") and self.theme_switch.get() == 1) else "Light",
                 "browser_cookies": self.config.get("browser_cookies"),
-                "cookie_file": self.config.get("cookie_file")
+                "cookie_file": self.config.get("cookie_file"),
+                "clip_enabled": self.clip_var.get() if hasattr(self, "clip_var") else False,
+                "clip_start": self.clip_start_entry.get().strip() if hasattr(self, "clip_start_entry") else "00:00:00",
+                "clip_end": self.clip_end_entry.get().strip() if hasattr(self, "clip_end_entry") else "00:01:00"
             }
             cpath = self._get_config_path()
             with open(cpath, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
+
+    def _toggle_clip_panel(self):
+        if hasattr(self, "clip_panel"):
+            if self.clip_var.get():
+                self.clip_panel.pack(fill="x", padx=4, pady=(4, 0))
+                self._on_clip_time_changed()
+            else:
+                self.clip_panel.pack_forget()
+        self._save_config()
+
+    def _parse_time_to_seconds(self, t_str):
+        """Convierte una cadena de tiempo (HH:MM:SS, MM:SS o segundos) a segundos enteros."""
+        if not t_str:
+            return 0
+        t_str = str(t_str).strip()
+        parts = t_str.split(":")
+        try:
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + int(float(parts[1]))
+            elif len(parts) == 1:
+                return int(float(parts[0]))
+        except ValueError:
+            return None
+        return None
+
+    def _format_seconds_to_time(self, total_sec):
+        """Formatea segundos enteros a HH:MM:SS."""
+        if total_sec is None or total_sec < 0:
+            total_sec = 0
+        h = total_sec // 3600
+        m = (total_sec % 3600) // 60
+        s = total_sec % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _format_duration_friendly(self, sec):
+        if sec is None or sec < 0:
+            return "0 s"
+        if sec < 60:
+            return f"{sec} s"
+        elif sec < 3600:
+            m = sec // 60
+            s = sec % 60
+            return f"{m} min {s:02d} s" if s else f"{m} min"
+        else:
+            h = sec // 3600
+            m = (sec % 3600) // 60
+            s = sec % 60
+            res = f"{h} h"
+            if m: res += f" {m} min"
+            if s: res += f" {s} s"
+            return res
+
+    def _apply_clip_preset(self, start_str, end_str):
+        self.clip_start_entry.delete(0, "end")
+        self.clip_start_entry.insert(0, start_str)
+        self.clip_end_entry.delete(0, "end")
+        self.clip_end_entry.insert(0, end_str)
+        self._on_clip_time_changed()
+        self._save_config()
+
+    def _on_clip_time_changed(self):
+        if not hasattr(self, "clip_start_entry") or not hasattr(self, "clip_end_entry"):
+            return
+        s_raw = self.clip_start_entry.get().strip()
+        e_raw = self.clip_end_entry.get().strip()
+        s_sec = self._parse_time_to_seconds(s_raw)
+        e_sec = self._parse_time_to_seconds(e_raw)
+
+        max_allowed = 8 * 3600  # Máximo 8 horas
+        if s_sec is None or e_sec is None:
+            self.clip_duration_label.configure(text="Formato inválido (usa HH:MM:SS)", text_color="#ef4444")
+            return
+        if s_sec < 0:
+            self.clip_duration_label.configure(text="El inicio debe ser >= 00:00:00", text_color="#ef4444")
+            return
+        if e_sec <= s_sec:
+            self.clip_duration_label.configure(text="El fin debe ser mayor al inicio", text_color="#ef4444")
+            return
+        if e_sec > max_allowed:
+            self.clip_duration_label.configure(text=f"Máximo permitido: 8 h ({self._format_seconds_to_time(max_allowed)})", text_color="#f59e0b")
+            return
+
+        dur = e_sec - s_sec
+        if self.video_duration_seconds:
+            self.clip_duration_label.configure(
+                text=f"Duración: {self._format_duration_friendly(dur)} (Total video: {self._format_duration_friendly(self.video_duration_seconds)})",
+                text_color="#38bdf8"
+            )
+        else:
+            self.clip_duration_label.configure(text=f"Duración: {self._format_duration_friendly(dur)}", text_color="#38bdf8")
 
     def _get_cookie_file(self):
         saved = self.config.get("cookie_file")
@@ -848,6 +1017,9 @@ class TurboDownloaderApp(ctk.CTk):
                 uploader = info.get("uploader", "Desconocido")
                 duration = info.get("duration_string", "")
                 self.current_video_title = title
+                duration_sec = info.get("duration")
+                if duration_sec:
+                    self.video_duration_seconds = int(duration_sec)
 
                 formats = info.get("formats", [])
                 height_map = {}
@@ -955,6 +1127,7 @@ class TurboDownloaderApp(ctk.CTk):
                 text=f"¡Resoluciones reales cargadas! Máxima detectada: {options[0].split('(')[0].strip()}",
                 text_color="#10b981"
             )
+            self._on_clip_time_changed()
 
     def _start_download_thread(self):
         if self.is_downloading:
@@ -1012,8 +1185,33 @@ class TurboDownloaderApp(ctk.CTk):
 
         selected_option = self.format_var.get()
         ignore_playlist = self.no_playlist_var.get()
+        is_clip = self.clip_var.get()
 
-        out_template = os.path.join(out_dir, "%(title)s.%(ext)s")
+        clip_start = None
+        clip_end = None
+        s_sec = None
+        e_sec = None
+        if is_clip:
+            s_raw = self.clip_start_entry.get().strip()
+            e_raw = self.clip_end_entry.get().strip()
+            s_sec = self._parse_time_to_seconds(s_raw)
+            e_sec = self._parse_time_to_seconds(e_raw)
+            if s_sec is None or e_sec is None or e_sec <= s_sec or e_sec > 8 * 3600 or s_sec < 0:
+                self.after(0, lambda: messagebox.showwarning("Atención", "El rango de tiempo de recorte no es válido.\nVerifica que 'Desde' sea menor que 'Hasta' y menor a 8 horas."))
+                self.is_downloading = False
+                self.after(0, lambda: self.download_btn.configure(state="normal", text="🚀 Descargar Selección"))
+                self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
+                self.after(0, lambda: self.status_label.configure(text="Error: Rango de recorte inválido.", text_color="#ef4444"))
+                return
+            clip_start = self._format_seconds_to_time(s_sec)
+            clip_end = self._format_seconds_to_time(e_sec)
+
+        if is_clip and clip_start and clip_end:
+            s_clean = clip_start.replace(":", ".")
+            e_clean = clip_end.replace(":", ".")
+            out_template = os.path.join(out_dir, f"%(title)s [{s_clean}-{e_clean}].%(ext)s")
+        else:
+            out_template = os.path.join(out_dir, "%(title)s.%(ext)s")
 
         cmd = list(self._get_ytdlp_cmd()) + ["--newline"]
 
@@ -1049,6 +1247,13 @@ class TurboDownloaderApp(ctk.CTk):
             cfile = self._get_cookie_file()
             if cfile:
                 cmd.extend(["--cookies", cfile])
+
+        # Manejo de Recorte de Fragmento de Tiempo
+        if is_clip and clip_start and clip_end:
+            cmd.extend([
+                "--download-sections", f"*{clip_start}-{clip_end}",
+                "--force-keyframes-at-cuts"
+            ])
 
         # Selector de audio universalmente compatible con contenedores MP4:
         # Priorizar m4a/aac (reproducible en todos los reproductores de Windows/móviles/smartTVs sin quedar mudo)
@@ -1105,7 +1310,10 @@ class TurboDownloaderApp(ctk.CTk):
             self.after(0, self._log, f"\n[INICIO] Descargando lista: {batch_path}")
         else:
             cmd.append(target_url)
-            self.after(0, self._log, f"\n[INICIO] Descargando: {target_url}\n[CALIDAD] {selected_option}")
+            log_msg = f"\n[INICIO] Descargando: {target_url}\n[CALIDAD] {selected_option}"
+            if is_clip and clip_start and clip_end:
+                log_msg += f"\n[RECORTE] ✂️ Fragmento: Desde {clip_start} hasta {clip_end} ({self._format_duration_friendly(e_sec - s_sec)})"
+            self.after(0, self._log, log_msg)
 
         self.after(0, self._log, f"[COMANDO] {' '.join(cmd)}\n")
 

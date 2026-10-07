@@ -46,10 +46,24 @@ socket.getaddrinfo = _doh_getaddrinfo
 if "--internal-ytdlp" in sys.argv:
     idx = sys.argv.index("--internal-ytdlp")
     cli_args = sys.argv[idx + 1:]
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(line_buffering=True, encoding='utf-8')
+        if hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(line_buffering=True, encoding='utf-8')
+    except Exception:
+        pass
     import yt_dlp
     sys.exit(yt_dlp.main(cli_args))
 
 if len(sys.argv) > 2 and sys.argv[1] == "-m" and sys.argv[2] == "yt_dlp":
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(line_buffering=True, encoding='utf-8')
+        if hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(line_buffering=True, encoding='utf-8')
+    except Exception:
+        pass
     import yt_dlp
     sys.exit(yt_dlp.main(sys.argv[3:]))
 
@@ -1205,6 +1219,9 @@ class TurboDownloaderApp(ctk.CTk):
                 return
             clip_start = self._format_seconds_to_time(s_sec)
             clip_end = self._format_seconds_to_time(e_sec)
+            target_clip_sec = e_sec - s_sec
+        else:
+            target_clip_sec = None
 
         if is_clip and clip_start and clip_end:
             s_clean = clip_start.replace(":", ".")
@@ -1318,8 +1335,12 @@ class TurboDownloaderApp(ctk.CTk):
         self.after(0, self._log, f"[COMANDO] {' '.join(cmd)}\n")
 
         pgbar_re = re.compile(r'\[PGBAR\]\s*([\d\.]+)%\|([^|]*)\|([^|]*)\|([^|\r\n]*)')
-        progress_re = re.compile(r'\[download\]\s+([\d\.]+)%(?:\s+of\s+~?\s*([^\s]+))?(?:\s+at\s+([^\s]+))?(?:\s+(?:ETA\s+|in\s+)([^\s]+))?')
-        aria2_re = re.compile(r'\[#[0-9a-fA-F]+\s+([^\s/]+)/([^\s(]+)\(([\d\.]+)%\)\s+CN:\d+\s+DL:([^\s]+)(?:\s+ETA:([^\s\]]+))?')
+        percent_re = re.compile(r'(\d{1,3}(?:\.\d+)?)%')
+        size_re = re.compile(r'(?:of|~)\s*~?\s*([\d\.]+\s*[kKmMgGtT]i?B)')
+        speed_re = re.compile(r'(?:at|DL:)\s*([\d\.]+\s*[kKmMgGtT]i?B/s|[kKmMgGtT]i?B)')
+        eta_re = re.compile(r'(?:ETA:?|in)\s*([0-9:]+|[0-9]+[smhd])', re.IGNORECASE)
+        time_re = re.compile(r'time=([0-9:.]+)')
+        speed_ffmpeg_re = re.compile(r'speed=\s*([\d\.]+x)')
 
         try:
             startupinfo = None
@@ -1327,6 +1348,9 @@ class TurboDownloaderApp(ctk.CTk):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
+
+            child_env = os.environ.copy()
+            child_env["PYTHONUNBUFFERED"] = "1"
 
             self.current_process = subprocess.Popen(
                 cmd,
@@ -1336,26 +1360,26 @@ class TurboDownloaderApp(ctk.CTk):
                 encoding="utf-8",
                 errors="replace",
                 startupinfo=startupinfo,
-                bufsize=1
+                bufsize=1,
+                env=child_env
             )
 
             for raw_chunk in self.current_process.stdout:
-                # Tratar múltiples actualizaciones en caso de retornos de carro \r
                 segments = [s.strip() for s in raw_chunk.replace('\r', '\n').split('\n') if s.strip()]
                 for clean_line in segments:
-                    # Limpiar secuencias de escape ANSI por seguridad
                     clean_line_no_ansi = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', clean_line)
 
-                    # Si es la línea de plantilla de progreso determinista [PGBAR]
+                    # 1. Línea determinista de plantilla [PGBAR]
                     pg_match = pgbar_re.search(clean_line_no_ansi)
                     if pg_match:
                         percent_str, total_size, speed, eta = pg_match.groups()
                         try:
-                            p_val = float(percent_str) / 100.0
+                            pct_num = float(percent_str)
+                            p_val = max(0.0, min(1.0, pct_num / 100.0))
                             size_str = total_size.strip() if total_size.strip() and total_size.strip() != "N/A" else ""
                             spd_str = speed.strip() if speed.strip() else ""
-                            eta_str = eta.strip() if eta.strip() else ""
-                            parts = [f"{percent_str}%"]
+                            eta_str = eta.strip() if eta.strip() and eta.strip() not in ("N/A", "NA") else ""
+                            parts = [f"{pct_num:.1f}%"]
                             if size_str: parts.append(f"de {size_str}")
                             if spd_str: parts.append(f"a {spd_str}")
                             if eta_str: parts.append(f"(Restante: {eta_str})")
@@ -1367,38 +1391,72 @@ class TurboDownloaderApp(ctk.CTk):
 
                     self.after(0, self._log, clean_line)
 
-                    # Detección de progreso nativo yt-dlp (fallback)
-                    match = progress_re.search(clean_line_no_ansi)
-                    if match:
-                        percent_str, total_size, speed, eta = match.groups()
+                    # 2. Detección universal de progreso por porcentaje [download] / aria2c / HLS / DASH
+                    pct_match = percent_re.search(clean_line_no_ansi)
+                    if pct_match and any(k in clean_line_no_ansi for k in ("[download]", "[#", "aria2")):
                         try:
-                            p_val = float(percent_str) / 100.0
-                            size_info = f" de {total_size}" if total_size else ""
-                            spd_info = f" a {speed}" if speed else ""
-                            eta_info = f" (Restante: {eta})" if eta else ""
-                            status_msg = f"Descargando: {percent_str}%{size_info}{spd_info}{eta_info}"
+                            pct_val = float(pct_match.group(1))
+                            p_val = max(0.0, min(1.0, pct_val / 100.0))
+                            m_sz = size_re.search(clean_line_no_ansi)
+                            size_str = m_sz.group(1).strip() if m_sz else ""
+                            m_spd = speed_re.search(clean_line_no_ansi)
+                            spd_str = m_spd.group(1).strip() if m_spd else ""
+                            m_eta = eta_re.search(clean_line_no_ansi)
+                            eta_str = m_eta.group(1).strip() if m_eta else ""
+                            parts = [f"{pct_val:.1f}%"]
+                            if size_str: parts.append(f"de {size_str}")
+                            if spd_str: parts.append(f"a {spd_str}")
+                            if eta_str: parts.append(f"(Restante: {eta_str})")
+                            status_msg = f"Descargando: {' '.join(parts)}"
                             self.after(0, self._update_progress, p_val, status_msg)
                         except ValueError:
                             pass
                         continue
 
-                    # Detección de progreso acelerador aria2c
-                    aria_match = aria2_re.search(clean_line_no_ansi)
-                    if aria_match:
-                        _cur, total_size, percent_str, speed, eta = aria_match.groups()
+                    # 3. Detección de progreso en recortes con FFmpeg (frame=... time=... speed=...)
+                    time_match = time_re.search(clean_line_no_ansi)
+                    if time_match:
                         try:
-                            p_val = float(percent_str) / 100.0
-                            eta_str = eta if eta else "en curso"
-                            status_msg = f"Turbo aria2c: {percent_str}% de {total_size} a {speed} (Restante: {eta_str})"
+                            t_str = time_match.group(1)
+                            parts = t_str.split(":")
+                            cur_sec = 0.0
+                            if len(parts) == 3:
+                                cur_sec = float(parts[0])*3600 + float(parts[1])*60 + float(parts[2])
+                            elif len(parts) == 2:
+                                cur_sec = float(parts[0])*60 + float(parts[1])
+
+                            target_sec = target_clip_sec or self.video_duration_seconds or 60.0
+                            p_val = min(0.99, max(0.01, cur_sec / target_sec)) if target_sec > 0 else 0.5
+
+                            spd_m = speed_ffmpeg_re.search(clean_line_no_ansi)
+                            spd_str = spd_m.group(1).strip() if spd_m else ""
+
+                            cur_friendly = self._format_duration_friendly(int(cur_sec))
+                            target_friendly = self._format_duration_friendly(int(target_sec))
+
+                            eta_txt = ""
+                            if spd_m:
+                                try:
+                                    mult = float(spd_m.group(1).replace("x", ""))
+                                    if mult > 0:
+                                        rem = max(0, int((target_sec - cur_sec) / mult))
+                                        eta_txt = f" (Restante: {self._format_duration_friendly(rem)})"
+                                except Exception:
+                                    pass
+
+                            spd_txt = f" a {spd_str}" if spd_str else ""
+                            status_msg = f"Descargando fragmento: {p_val*100:.1f}% ({cur_friendly} de {target_friendly}){spd_txt}{eta_txt}"
                             self.after(0, self._update_progress, p_val, status_msg)
-                        except ValueError:
+                        except Exception:
                             pass
                         continue
 
                     if "[ExtractAudio]" in clean_line:
-                        self.after(0, self._update_status, "Extrayendo audio a máxima fidelidad...", "#f59e0b")
+                        self.after(0, self._update_status, "🎵 Extrayendo audio a máxima fidelidad...", "#f59e0b")
                     elif "[Merger]" in clean_line:
-                        self.after(0, self._update_status, "Uniendo pistas de video y audio en MP4...", "#f59e0b")
+                        self.after(0, self._update_status, "🎬 Uniendo pistas de video y audio en MP4...", "#f59e0b")
+                    elif "Destination:" in clean_line:
+                        self.after(0, self._update_status, "Descargando pista...", "#60a5fa")
 
             self.current_process.wait()
             returncode = self.current_process.returncode
@@ -1414,8 +1472,9 @@ class TurboDownloaderApp(ctk.CTk):
             self.current_process = None
 
     def _update_progress(self, val, msg):
+        val = max(0.0, min(1.0, float(val)))
         self.progress_bar.set(val)
-        self.status_label.configure(text=f"Estado: {msg}", text_color="#60a5fa")
+        self.status_label.configure(text=f"Estado: {msg}", text_color="#38bdf8")
 
     def _update_status(self, msg, color="#60a5fa"):
         self.status_label.configure(text=f"Estado: {msg}", text_color=color)

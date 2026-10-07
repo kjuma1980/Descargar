@@ -70,6 +70,7 @@ if len(sys.argv) > 2 and sys.argv[1] == "-m" and sys.argv[2] == "yt_dlp":
 
 import re
 import json
+import queue
 import shutil
 import subprocess
 import threading
@@ -84,6 +85,10 @@ ctk.set_default_color_theme("blue")
 class TurboDownloaderApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+
+        # Cola para comunicación 100% thread-safe entre hilos de fondo y la interfaz
+        self.ui_queue = queue.Queue()
+        self.after(40, self._process_ui_queue)
 
         # Configuración de ventana principal
         self.title("Turbo Descargar v3.0 - YouTube Downloader Ultra")
@@ -120,6 +125,29 @@ class TurboDownloaderApp(ctk.CTk):
         self._build_ui()
         self._check_environment()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _safe_ui(self, func, *args):
+        """Pone una tarea en la cola del hilo principal sin llamar a C-API de Tkinter desde hilos secundarios."""
+        self.ui_queue.put((func, args))
+
+    def _process_ui_queue(self):
+        """Bucle permanente en el hilo principal que consume eventos de UI sin bloqueos de GIL ni RuntimeError."""
+        try:
+            while True:
+                func, args = self.ui_queue.get_nowait()
+                try:
+                    func(*args)
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self.after(40, self._process_ui_queue)
+            except Exception:
+                pass
 
     def _build_ui(self):
         # 1. ENCABEZADO
@@ -1001,22 +1029,22 @@ class TurboDownloaderApp(ctk.CTk):
                         # 1. Probar bypass automático con Firefox si aún no hay cookies configuradas
                         if not self.config.get("browser_cookies") and not self._get_cookie_file():
                             try:
-                                self.after(0, self._log, "[ANTI-BOT] YouTube solicitó verificación. Probando sesión de Firefox automáticamente...")
+                                self._safe_ui(self._log, "[ANTI-BOT] YouTube solicitó verificación. Probando sesión de Firefox automáticamente...")
                                 retry_opts = dict(ydl_opts)
                                 retry_opts['cookiesfrombrowser'] = ('firefox', None, None, None)
                                 with yt_dlp.YoutubeDL(retry_opts) as ydl_ff:
                                     info = ydl_ff.extract_info(url, download=False)
                                     self.config["browser_cookies"] = "firefox"
                                     self._save_config()
-                                    self.after(0, self._update_cookie_button)
-                                    self.after(0, self._log, "[ANTI-BOT] ¡Bypass automático exitoso con Firefox! Sesión guardada.")
+                                    self._safe_ui(self._update_cookie_button)
+                                    self._safe_ui(self._log, "[ANTI-BOT] ¡Bypass automático exitoso con Firefox! Sesión guardada.")
                             except Exception:
                                 pass
 
                         # 2. Si todavía no hay info, intentar clientes móviles alternativos
                         if not info:
                             try:
-                                self.after(0, self._log, "[ANTI-BOT] Probando cliente alternativo...")
+                                self._safe_ui(self._log, "[ANTI-BOT] Probando cliente alternativo...")
                                 alt_opts = dict(ydl_opts)
                                 alt_opts['extractor_args'] = {'youtube': {'player_client': ['android', 'visionos', 'default']}}
                                 with yt_dlp.YoutubeDL(alt_opts) as ydl_alt:
@@ -1112,21 +1140,21 @@ class TurboDownloaderApp(ctk.CTk):
                 res_summary = ", ".join([f"{h}p" for h in sorted_heights])
                 card_text = f"🎬 {title}\n👤 Canal: {uploader} | ⏱️ Duración: {duration}\n📺 Resoluciones reales disponibles en YouTube: {res_summary}"
 
-                self.after(0, self._apply_real_formats, new_options, card_text)
-                self.after(0, self._log, f"[INFO] Calidades reales cargadas para: '{title}' ({res_summary})")
+                self._safe_ui(self._apply_real_formats, new_options, card_text)
+                self._safe_ui(self._log, f"[INFO] Calidades reales cargadas para: '{title}' ({res_summary})")
 
             except Exception as e:
                 err_text = str(e)
-                self.after(0, self._log, f"[ERROR AL CARGAR CALIDADES] {err_text}")
+                self._safe_ui(self._log, f"[ERROR AL CARGAR CALIDADES] {err_text}")
                 if any(w in err_text.lower() for w in ("bot", "sign in", "confirm you", "403")):
                     tip_msg = "YouTube activó verificación anti-bot. Haz clic en '🍪 Cookies' para activar Firefox o cookies.txt."
-                    self.after(0, lambda: self.status_label.configure(text=tip_msg, text_color="#f59e0b"))
-                    self.after(0, self._log, f"[ANTI-BOT] {tip_msg}")
+                    self._safe_ui(self.status_label.configure, text=tip_msg, text_color="#f59e0b")
+                    self._safe_ui(self._log, f"[ANTI-BOT] {tip_msg}")
                 else:
-                    self.after(0, lambda: self.status_label.configure(text=f"Error consultando calidades: {err_text}", text_color="#ef4444"))
+                    self._safe_ui(self.status_label.configure, text=f"Error consultando calidades: {err_text}", text_color="#ef4444")
             finally:
                 self.is_analyzing = False
-                self.after(0, lambda: self.analyze_btn.configure(state="normal", text="🔍 Cargar Calidades"))
+                self._safe_ui(self.analyze_btn.configure, state="normal", text="🔍 Cargar Calidades")
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1157,13 +1185,57 @@ class TurboDownloaderApp(ctk.CTk):
             messagebox.showwarning("Atención", "El enlace ingresado no parece una URL válida de YouTube.")
             return
 
+        out_dir = os.path.realpath(self.dir_entry.get().strip() or self.download_dir)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        selected_option = self.format_var.get()
+        ignore_playlist = self.no_playlist_var.get()
+        is_clip = self.clip_var.get()
+        is_turbo = self.turbo_var.get()
+
+        clip_start = None
+        clip_end = None
+        s_sec = None
+        e_sec = None
+        target_clip_sec = None
+        if is_clip:
+            s_raw = self.clip_start_entry.get().strip()
+            e_raw = self.clip_end_entry.get().strip()
+            s_sec = self._parse_time_to_seconds(s_raw)
+            e_sec = self._parse_time_to_seconds(e_raw)
+            if s_sec is None or e_sec is None or e_sec <= s_sec or e_sec > 8 * 3600 or s_sec < 0:
+                messagebox.showwarning("Atención", "El rango de tiempo de recorte no es válido.\nVerifica que 'Desde' sea menor que 'Hasta' y menor a 8 horas.")
+                return
+            clip_start = self._format_seconds_to_time(s_sec)
+            clip_end = self._format_seconds_to_time(e_sec)
+            target_clip_sec = e_sec - s_sec
+
+        self._save_config()
+
+        params = {
+            "target_url": target_url,
+            "out_dir": out_dir,
+            "selected_option": selected_option,
+            "ignore_playlist": ignore_playlist,
+            "is_clip": is_clip,
+            "clip_start": clip_start,
+            "clip_end": clip_end,
+            "s_sec": s_sec,
+            "e_sec": e_sec,
+            "target_clip_sec": target_clip_sec,
+            "is_turbo": is_turbo,
+        }
+
         self.is_downloading = True
         self.download_btn.configure(state="disabled", text="⏳ Descargando...")
         self.cancel_btn.configure(state="normal")
         self.progress_bar.set(0)
         self.status_label.configure(text="Estado: Iniciando descarga...", text_color="#60a5fa")
 
-        thread = threading.Thread(target=self._run_download, args=(target_url,), daemon=True)
+        thread = threading.Thread(target=self._run_download, args=(params,), daemon=True)
         thread.start()
 
     def _get_ytdlp_cmd(self):
@@ -1178,6 +1250,10 @@ class TurboDownloaderApp(ctk.CTk):
         # 2. Si se ejecuta desde Python directamente, invocar el módulo con el mismo intérprete
         py_exe = sys.executable
         if py_exe and os.path.isfile(py_exe) and not py_exe.lower().endswith("turbodescargar.exe"):
+            if py_exe.lower().endswith("pythonw.exe"):
+                console_py = py_exe[:-5] + ".exe"
+                if os.path.isfile(console_py):
+                    return [console_py, "-m", "yt_dlp"]
             return [py_exe, "-m", "yt_dlp"]
 
         # 3. Buscar yt-dlp.exe explícitamente en el PATH como respaldo
@@ -1187,41 +1263,18 @@ class TurboDownloaderApp(ctk.CTk):
 
         return [sys.executable, "--internal-ytdlp"]
 
-    def _run_download(self, target_url):
-        # Guardar carpeta y preferencias automáticamente al iniciar descarga
-        self._save_config()
-
-        out_dir = os.path.realpath(self.dir_entry.get().strip() or self.download_dir)
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except Exception:
-            pass
-
-        selected_option = self.format_var.get()
-        ignore_playlist = self.no_playlist_var.get()
-        is_clip = self.clip_var.get()
-
-        clip_start = None
-        clip_end = None
-        s_sec = None
-        e_sec = None
-        if is_clip:
-            s_raw = self.clip_start_entry.get().strip()
-            e_raw = self.clip_end_entry.get().strip()
-            s_sec = self._parse_time_to_seconds(s_raw)
-            e_sec = self._parse_time_to_seconds(e_raw)
-            if s_sec is None or e_sec is None or e_sec <= s_sec or e_sec > 8 * 3600 or s_sec < 0:
-                self.after(0, lambda: messagebox.showwarning("Atención", "El rango de tiempo de recorte no es válido.\nVerifica que 'Desde' sea menor que 'Hasta' y menor a 8 horas."))
-                self.is_downloading = False
-                self.after(0, lambda: self.download_btn.configure(state="normal", text="🚀 Descargar Selección"))
-                self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
-                self.after(0, lambda: self.status_label.configure(text="Error: Rango de recorte inválido.", text_color="#ef4444"))
-                return
-            clip_start = self._format_seconds_to_time(s_sec)
-            clip_end = self._format_seconds_to_time(e_sec)
-            target_clip_sec = e_sec - s_sec
-        else:
-            target_clip_sec = None
+    def _run_download(self, params):
+        target_url = params["target_url"]
+        out_dir = params["out_dir"]
+        selected_option = params["selected_option"]
+        ignore_playlist = params["ignore_playlist"]
+        is_clip = params["is_clip"]
+        clip_start = params["clip_start"]
+        clip_end = params["clip_end"]
+        s_sec = params["s_sec"]
+        e_sec = params["e_sec"]
+        target_clip_sec = params["target_clip_sec"]
+        is_turbo = params["is_turbo"]
 
         if is_clip and clip_start and clip_end:
             s_clean = clip_start.replace(":", ".")
@@ -1241,7 +1294,7 @@ class TurboDownloaderApp(ctk.CTk):
             cmd.append("--no-playlist")
 
         # ⚡ ACELERADOR DE ANCHO DE BANDA AL 100% (Modo Turbo Nativo)
-        if self.turbo_var.get():
+        if is_turbo:
             cmd.extend([
                 "--concurrent-fragments", "16",
                 "--buffer-size", "16M"
@@ -1324,15 +1377,15 @@ class TurboDownloaderApp(ctk.CTk):
         if target_url.startswith("batch:"):
             batch_path = target_url.replace("batch:", "").strip()
             cmd.extend(["-a", batch_path])
-            self.after(0, self._log, f"\n[INICIO] Descargando lista: {batch_path}")
+            self._safe_ui(self._log, f"\n[INICIO] Descargando lista: {batch_path}")
         else:
             cmd.append(target_url)
             log_msg = f"\n[INICIO] Descargando: {target_url}\n[CALIDAD] {selected_option}"
             if is_clip and clip_start and clip_end:
                 log_msg += f"\n[RECORTE] ✂️ Fragmento: Desde {clip_start} hasta {clip_end} ({self._format_duration_friendly(e_sec - s_sec)})"
-            self.after(0, self._log, log_msg)
+            self._safe_ui(self._log, log_msg)
 
-        self.after(0, self._log, f"[COMANDO] {' '.join(cmd)}\n")
+        self._safe_ui(self._log, f"[COMANDO] {' '.join(cmd)}\n")
 
         pgbar_re = re.compile(r'\[PGBAR\]\s*([\d\.]+)%\|([^|]*)\|([^|]*)\|([^|\r\n]*)')
         percent_re = re.compile(r'(\d{1,3}(?:\.\d+)?)%')
@@ -1364,9 +1417,33 @@ class TurboDownloaderApp(ctk.CTk):
                 env=child_env
             )
 
-            for raw_chunk in self.current_process.stdout:
-                segments = [s.strip() for s in raw_chunk.replace('\r', '\n').split('\n') if s.strip()]
-                for clean_line in segments:
+            read_buffer = ""
+            error_output = []
+            while True:
+                chunk = self.current_process.stdout.read(64)
+                if not chunk:
+                    if read_buffer.strip():
+                        clean_line = read_buffer.strip()
+                        error_output.append(clean_line)
+                        self._safe_ui(self._log, clean_line)
+                    break
+                read_buffer += chunk
+                while '\r' in read_buffer or '\n' in read_buffer:
+                    r_pos = read_buffer.find('\r')
+                    n_pos = read_buffer.find('\n')
+                    if r_pos != -1 and n_pos != -1:
+                        sep = min(r_pos, n_pos)
+                    elif r_pos != -1:
+                        sep = r_pos
+                    else:
+                        sep = n_pos
+
+                    clean_line = read_buffer[:sep].strip()
+                    read_buffer = read_buffer[sep + 1:]
+                    if not clean_line:
+                        continue
+
+                    error_output.append(clean_line)
                     clean_line_no_ansi = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', clean_line)
 
                     # 1. Línea determinista de plantilla [PGBAR]
@@ -1384,12 +1461,12 @@ class TurboDownloaderApp(ctk.CTk):
                             if spd_str: parts.append(f"a {spd_str}")
                             if eta_str: parts.append(f"(Restante: {eta_str})")
                             status_msg = f"Descargando: {' '.join(parts)}"
-                            self.after(0, self._update_progress, p_val, status_msg)
+                            self._safe_ui(self._update_progress, p_val, status_msg)
                         except ValueError:
                             pass
                         continue
 
-                    self.after(0, self._log, clean_line)
+                    self._safe_ui(self._log, clean_line)
 
                     # 2. Detección universal de progreso por porcentaje [download] / aria2c / HLS / DASH
                     pct_match = percent_re.search(clean_line_no_ansi)
@@ -1408,7 +1485,7 @@ class TurboDownloaderApp(ctk.CTk):
                             if spd_str: parts.append(f"a {spd_str}")
                             if eta_str: parts.append(f"(Restante: {eta_str})")
                             status_msg = f"Descargando: {' '.join(parts)}"
-                            self.after(0, self._update_progress, p_val, status_msg)
+                            self._safe_ui(self._update_progress, p_val, status_msg)
                         except ValueError:
                             pass
                         continue
@@ -1446,28 +1523,150 @@ class TurboDownloaderApp(ctk.CTk):
 
                             spd_txt = f" a {spd_str}" if spd_str else ""
                             status_msg = f"Descargando fragmento: {p_val*100:.1f}% ({cur_friendly} de {target_friendly}){spd_txt}{eta_txt}"
-                            self.after(0, self._update_progress, p_val, status_msg)
+                            self._safe_ui(self._update_progress, p_val, status_msg)
                         except Exception:
                             pass
                         continue
 
                     if "[ExtractAudio]" in clean_line:
-                        self.after(0, self._update_status, "🎵 Extrayendo audio a máxima fidelidad...", "#f59e0b")
+                        self._safe_ui(self._update_status, "🎵 Extrayendo audio a máxima fidelidad...", "#f59e0b")
                     elif "[Merger]" in clean_line:
-                        self.after(0, self._update_status, "🎬 Uniendo pistas de video y audio en MP4...", "#f59e0b")
+                        self._safe_ui(self._update_status, "🎬 Uniendo pistas de video y audio en MP4...", "#f59e0b")
                     elif "Destination:" in clean_line:
-                        self.after(0, self._update_status, "Descargando pista...", "#60a5fa")
+                        self._safe_ui(self._update_status, "Iniciando descarga...", "#60a5fa")
 
             self.current_process.wait()
             returncode = self.current_process.returncode
 
+            # AUTO-FALLBACK: Si el recorte falló con 403 Forbidden o error de FFmpeg por bloqueo de YouTube al streaming directo
+            has_clip_error = any(
+                "403" in l or "forbidden" in l.lower() or "access denied" in l.lower() or
+                "3436169992" in l or "error opening input" in l.lower() or "exited with code" in l.lower()
+                for l in error_output[-50:]
+            )
+            if returncode != 0 and is_clip and has_clip_error:
+                self._safe_ui(self._log, "\n[AVISO] YouTube restringió el streaming directo del fragmento (Error 403).")
+                self._safe_ui(self._log, "[AUTO-FALLBACK] Iniciando descarga con acelerador multihilo para recorte local sin fallos...")
+                self._safe_ui(self._update_status, "Descargando para recorte local...", "#f59e0b")
+
+                fallback_cmd = [x for x in cmd if x not in ("--force-keyframes-at-cuts",)]
+                if "--download-sections" in fallback_cmd:
+                    ds_i = fallback_cmd.index("--download-sections")
+                    fallback_cmd.pop(ds_i)
+                    if ds_i < len(fallback_cmd):
+                        fallback_cmd.pop(ds_i)
+
+                import time as _t
+                temp_filename = os.path.join(out_dir, f"_temp_full_{int(_t.time())}.%(ext)s")
+                if "-o" in fallback_cmd:
+                    o_i = fallback_cmd.index("-o")
+                    fallback_cmd[o_i + 1] = temp_filename
+
+                self._safe_ui(self._log, f"[FALLBACK-CMD] {' '.join(fallback_cmd)}\n")
+                fb_proc = subprocess.Popen(
+                    fallback_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    startupinfo=startupinfo,
+                    bufsize=1,
+                    env=child_env
+                )
+                self.current_process = fb_proc
+                fb_buffer = ""
+                while True:
+                    ch = fb_proc.stdout.read(64)
+                    if not ch:
+                        break
+                    fb_buffer += ch
+                    while '\r' in fb_buffer or '\n' in fb_buffer:
+                        r_pos = fb_buffer.find('\r')
+                        n_pos = fb_buffer.find('\n')
+                        sep = min(r_pos, n_pos) if (r_pos != -1 and n_pos != -1) else (r_pos if r_pos != -1 else n_pos)
+                        fb_line = fb_buffer[:sep].strip()
+                        fb_buffer = fb_buffer[sep + 1:]
+                        if not fb_line:
+                            continue
+                        clean_fb = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', fb_line)
+                        pm = pgbar_re.search(clean_fb)
+                        if pm:
+                            p_str, t_sz, spd, eta = pm.groups()
+                            try:
+                                pct_num = float(p_str)
+                                p_val = max(0.0, min(1.0, pct_num / 100.0))
+                                size_str = t_sz.strip() if t_sz.strip() and t_sz.strip() != "N/A" else ""
+                                spd_str = spd.strip() if spd.strip() else ""
+                                eta_str = eta.strip() if eta.strip() and eta.strip() not in ("N/A", "NA") else ""
+                                parts = [f"{pct_num:.1f}%"]
+                                if size_str: parts.append(f"de {size_str}")
+                                if spd_str: parts.append(f"a {spd_str}")
+                                if eta_str: parts.append(f"(Restante: {eta_str})")
+                                self._safe_ui(self._update_progress, p_val, f"Descargando video base: {' '.join(parts)}")
+                            except Exception:
+                                pass
+                            continue
+                        self._safe_ui(self._log, fb_line)
+
+                fb_proc.wait()
+                if fb_proc.returncode == 0:
+                    downloaded_file = None
+                    base_prefix = os.path.basename(temp_filename).replace(".%(ext)s", "")
+                    for f in os.listdir(out_dir):
+                        if f.startswith(base_prefix) and not f.endswith(".part"):
+                            downloaded_file = os.path.join(out_dir, f)
+                            break
+
+                    if downloaded_file and os.path.isfile(downloaded_file):
+                        self._safe_ui(self._update_status, "✂️ Recortando fragmento con FFmpeg...", "#f59e0b")
+                        self._safe_ui(self._update_progress, 0.95, "✂️ Aplicando corte de tiempo con FFmpeg...")
+                        self._safe_ui(self._log, f"[RECORTE LOCAL] Recortando desde {clip_start} hasta {clip_end}...")
+                        clean_title = re.sub(r'[\\/*?:"<>|]', '', self.current_video_title or 'Video').strip()
+                        final_out = os.path.join(out_dir, f"{clean_title} [{s_clean}-{e_clean}].mp4")
+                        ff_exe = ffmpeg_bin or "ffmpeg"
+                        cut_cmd = [
+                            ff_exe, "-y",
+                            "-ss", str(clip_start),
+                            "-to", str(clip_end),
+                            "-i", downloaded_file,
+                            "-c", "copy",
+                            final_out
+                        ]
+                        cut_res = subprocess.run(cut_cmd, capture_output=True, text=True, startupinfo=startupinfo)
+                        try:
+                            os.remove(downloaded_file)
+                        except Exception:
+                            pass
+
+                        if cut_res.returncode == 0 and os.path.isfile(final_out):
+                            returncode = 0
+                            self._safe_ui(self._log, f"[ÉXITO RECORTE] Fragmento guardado correctamente: {final_out}")
+                        else:
+                            self._safe_ui(self._log, f"[AVISO] Falló corte rápido (-c copy), reintentando con transcodificación precisa...")
+                            cut_cmd_reencode = [
+                                ff_exe, "-y",
+                                "-ss", str(clip_start),
+                                "-to", str(clip_end),
+                                "-i", downloaded_file,
+                                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                                "-c:a", "aac", "-b:a", "192k",
+                                final_out
+                            ]
+                            cut_res2 = subprocess.run(cut_cmd_reencode, capture_output=True, text=True, startupinfo=startupinfo)
+                            if cut_res2.returncode == 0 and os.path.isfile(final_out):
+                                returncode = 0
+                                self._safe_ui(self._log, f"[ÉXITO RECORTE] Fragmento guardado correctamente: {final_out}")
+                            else:
+                                self._safe_ui(self._log, f"[ERROR RECORTE FFmpeg] {cut_res.stderr or cut_res2.stderr}")
+
             if returncode == 0:
-                self.after(0, self._on_download_complete, True, "¡Descarga finalizada con éxito!")
+                self._safe_ui(self._on_download_complete, True, "¡Descarga finalizada con éxito!")
             else:
-                self.after(0, self._on_download_complete, False, f"Proceso finalizado con código {returncode}. Revisa la consola.")
+                self._safe_ui(self._on_download_complete, False, f"Proceso finalizado con código {returncode}. Revisa la consola.")
 
         except Exception as e:
-            self.after(0, self._on_download_complete, False, f"Error durante la descarga: {str(e)}")
+            self._safe_ui(self._on_download_complete, False, f"Error durante la descarga: {str(e)}")
         finally:
             self.current_process = None
 
@@ -1524,8 +1723,8 @@ class TurboDownloaderApp(ctk.CTk):
 
     def _update_ytdlp(self):
         def _task():
-            self._log("\n[*] Comprobando actualizaciones de yt-dlp...")
-            self.update_btn.configure(state="disabled", text="⏳ Actualizando...")
+            self._safe_ui(self._log, "\n[*] Comprobando actualizaciones de yt-dlp...")
+            self._safe_ui(self.update_btn.configure, state="disabled", text="⏳ Actualizando...")
             try:
                 res = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
@@ -1533,15 +1732,15 @@ class TurboDownloaderApp(ctk.CTk):
                     text=True,
                     encoding="utf-8"
                 )
-                self.after(0, self._log, res.stdout)
+                self._safe_ui(self._log, res.stdout)
                 if res.returncode == 0:
-                    self.after(0, lambda: messagebox.showinfo("Actualización", "yt-dlp actualizado a la versión más reciente."))
+                    self._safe_ui(messagebox.showinfo, "Actualización", "yt-dlp actualizado a la versión más reciente.")
                 else:
-                    self.after(0, self._log, res.stderr)
+                    self._safe_ui(self._log, res.stderr)
             except Exception as e:
-                self.after(0, self._log, f"[ERROR] {e}")
+                self._safe_ui(self._log, f"[ERROR] {e}")
             finally:
-                self.after(0, lambda: self.update_btn.configure(state="normal", text="🔄 Actualizar yt-dlp"))
+                self._safe_ui(self.update_btn.configure, state="normal", text="🔄 Actualizar yt-dlp")
 
         threading.Thread(target=_task, daemon=True).start()
 

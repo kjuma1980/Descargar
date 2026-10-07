@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Inno Setup builds
+build/
+dist/
+Output/
+*.lnk
+
+# User downloads and temporary data
+Descargas/
+*.mp4
+*.webm
+*.m4a
+*.mp3
+
+# Local credentials / cookies
+cookies.txt

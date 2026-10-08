@@ -1325,10 +1325,10 @@ class TurboDownloaderApp(ctk.CTk):
                 "--force-keyframes-at-cuts"
             ])
 
-        # Selector de audio universalmente compatible con contenedores MP4:
-        # Priorizar m4a/aac (reproducible en todos los reproductores de Windows/móviles/smartTVs sin quedar mudo)
-        # y como respaldo opus/bestaudio
-        audio_pref = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio"
+        # Constructor que garantiza que NINGUNA alternativa descargue únicamente audio
+        # Cada rama vincula estrictamente [VIDEO] + [AUDIO] (m4a -> aac -> bestaudio)
+        def _pair_with_audio(v_expr):
+            return f"{v_expr}+bestaudio[ext=m4a]/{v_expr}+bestaudio[acodec^=mp4a]/{v_expr}+bestaudio"
 
         # Asignar formato REAL seleccionado
         target_info = self.format_height_map.get(selected_option)
@@ -1341,31 +1341,46 @@ class TurboDownloaderApp(ctk.CTk):
             target_h = target_info.get("height")
             fmt_id = target_info.get("format_id")
             # Selección estricta y compatible:
-            # 1. format_id detectado + audio compatible (m4a/aac)
-            # 2. mejor video de esa altura directo por http + audio compatible
-            # 3. mejor video de esa altura o menor + mejor audio
-            fmt_selector = (
-                f"{fmt_id}+{audio_pref}/"
-                f"bestvideo[height={target_h}][protocol^=http]+{audio_pref}/"
-                f"bestvideo[height={target_h}]+bestaudio/"
-                f"bestvideo[height<={target_h}]+bestaudio/best"
-            )
+            # 1. format_id detectado + audio (m4a -> aac -> bestaudio)
+            # 2. mejor video de esa altura directo por http + audio
+            # 3. mejor video de esa altura + audio
+            # 4. mejor video de esa altura o menor + audio
+            # 5. cualquier combinación video+audio
+            # 6. mejor flujo global
+            branches = [
+                _pair_with_audio(fmt_id),
+                _pair_with_audio(f"bestvideo[height={target_h}][protocol^=http]"),
+                _pair_with_audio(f"bestvideo[height={target_h}]"),
+                _pair_with_audio(f"bestvideo[height<={target_h}]"),
+                "bestvideo+bestaudio",
+                "best"
+            ]
+            fmt_selector = "/".join(branches)
             cmd.extend([
                 "-f", fmt_selector,
                 "--merge-output-format", "mp4"
             ])
         elif isinstance(target_info, int):
-            fmt_selector = (
-                f"bestvideo[height={target_info}][protocol^=http]+{audio_pref}/"
-                f"bestvideo[height={target_info}]+bestaudio/"
-                f"bestvideo[height<={target_info}]+bestaudio/best"
-            )
+            branches = [
+                _pair_with_audio(f"bestvideo[height={target_info}][protocol^=http]"),
+                _pair_with_audio(f"bestvideo[height={target_info}]"),
+                _pair_with_audio(f"bestvideo[height<={target_info}]"),
+                "bestvideo+bestaudio",
+                "best"
+            ]
+            fmt_selector = "/".join(branches)
             cmd.extend([
                 "-f", fmt_selector,
                 "--merge-output-format", "mp4"
             ])
         else:
-            fmt_selector = f"bestvideo[protocol^=http]+{audio_pref}/bestvideo+bestaudio/best"
+            branches = [
+                _pair_with_audio("bestvideo[protocol^=http]"),
+                _pair_with_audio("bestvideo"),
+                "bestvideo+bestaudio",
+                "best"
+            ]
+            fmt_selector = "/".join(branches)
             cmd.extend([
                 "-f", fmt_selector,
                 "--merge-output-format", "mp4"

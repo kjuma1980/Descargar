@@ -1022,7 +1022,7 @@ class TurboDownloaderApp(ctk.CTk):
                     'no_warnings': True,
                     'extract_flat': False,
                     'skip_download': True,
-                    'extractor_args': {'youtube': {'player_client': ['android', 'visionos', 'default']}}
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
                 self._apply_cookie_opts(ydl_opts)
 
@@ -1048,12 +1048,12 @@ class TurboDownloaderApp(ctk.CTk):
                             except Exception:
                                 pass
 
-                        # 2. Si todavía no hay info, intentar clientes móviles alternativos
+                        # 2. Si todavía no hay info, intentar clientes visionos y web
                         if not info:
                             try:
                                 self._safe_ui(self._log, "[ANTI-BOT] Probando cliente alternativo...")
                                 alt_opts = dict(ydl_opts)
-                                alt_opts['extractor_args'] = {'youtube': {'player_client': ['android', 'visionos', 'default']}}
+                                alt_opts['extractor_args'] = {'youtube': {'player_client': ['visionos', 'web', 'default']}}
                                 with yt_dlp.YoutubeDL(alt_opts) as ydl_alt:
                                     info = ydl_alt.extract_info(url, download=False)
                             except Exception:
@@ -1141,6 +1141,23 @@ class TurboDownloaderApp(ctk.CTk):
                         "has_audio": info_h.get("has_audio", False)
                     }
 
+                # Garantizar que las resoluciones HD comunes siempre estén disponibles para seleccionar
+                standard_hd = [
+                    (1440, "🎬 1440p (2K Quad HD 2560x1440)"),
+                    (1080, "🎬 1080p (Full HD 1920x1080)"),
+                    (720, "🎬 720p (HD 1280x720)")
+                ]
+                for std_h, std_label in standard_hd:
+                    if std_h not in height_map:
+                        insert_idx = len(new_options)
+                        for idx, opt in enumerate(new_options):
+                            opt_entry = self.format_height_map.get(opt)
+                            if isinstance(opt_entry, dict) and std_h > opt_entry.get("height", 0):
+                                insert_idx = idx
+                                break
+                        new_options.insert(insert_idx, std_label)
+                        self.format_height_map[std_label] = {"height": std_h, "format_id": f"bestvideo[height<={std_h}]"}
+
                 # Opciones de audio
                 mp3_label = "🎵 Audio: MP3 Máxima Calidad (320 kbps)"
                 orig_label = "🎼 Audio: Calidad Original sin recodificar"
@@ -1178,6 +1195,7 @@ class TurboDownloaderApp(ctk.CTk):
 
                 # Opciones estándar garantizadas para selección inmediata
                 fallback_options = [
+                    "🎬 1440p (2K Quad HD 2560x1440)",
                     "🎬 1080p (Full HD 1920x1080)",
                     "🎬 720p (HD 1280x720)",
                     "🎬 480p (SD)",
@@ -1186,6 +1204,7 @@ class TurboDownloaderApp(ctk.CTk):
                     "🎼 Audio: Calidad Original sin recodificar"
                 ]
                 self.format_height_map.clear()
+                self.format_height_map["🎬 1440p (2K Quad HD 2560x1440)"] = {"height": 1440, "format_id": "bestvideo[height=1440]"}
                 self.format_height_map["🎬 1080p (Full HD 1920x1080)"] = {"height": 1080, "format_id": "bestvideo[height=1080]"}
                 self.format_height_map["🎬 720p (HD 1280x720)"] = {"height": 720, "format_id": "bestvideo[height=720]"}
                 self.format_height_map["🎬 480p (SD)"] = {"height": 480, "format_id": "bestvideo[height=480]"}
@@ -1193,9 +1212,9 @@ class TurboDownloaderApp(ctk.CTk):
                 self.format_height_map["🎵 Audio: MP3 Máxima Calidad (320 kbps)"] = "mp3"
                 self.format_height_map["🎼 Audio: Calidad Original sin recodificar"] = "original"
 
-                card_text = f"🎬 {fallback_title}\n👤 Canal: {fallback_uploader}\n📺 Calidades listas para descargar (1080p, 720p, 480p, 360p, Audio)"
+                card_text = f"🎬 {fallback_title}\n👤 Canal: {fallback_uploader}\n📺 Calidades listas para descargar (1440p, 1080p, 720p, 480p, 360p, Audio)"
                 self._safe_ui(self._apply_real_formats, fallback_options, card_text)
-                self._safe_ui(self._log, f"[INFO] Calidades listas para: '{fallback_title}' (1080p, 720p, 480p, 360p, Audio)")
+                self._safe_ui(self._log, f"[INFO] Calidades listas para: '{fallback_title}' (1440p, 1080p, 720p, 480p, 360p, Audio)")
             finally:
                 self.is_analyzing = False
                 self._safe_ui(self.analyze_btn.configure, state="normal", text="🔍 Cargar Calidades")
@@ -1350,7 +1369,7 @@ class TurboDownloaderApp(ctk.CTk):
             "--retries", "3",
             "--fragment-retries", "3",
             "--no-colors",
-            "--extractor-args", "youtube:player_client=android,visionos,default",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "--progress-template", "download:[PGBAR]%(progress._percent_str)s|%(progress._total_bytes_estimate_str,progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
         ])
 

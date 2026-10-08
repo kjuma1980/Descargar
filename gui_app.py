@@ -1021,7 +1021,8 @@ class TurboDownloaderApp(ctk.CTk):
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': False,
-                    'skip_download': True
+                    'skip_download': True,
+                    'extractor_args': {'youtube': {'player_client': ['android', 'visionos', 'default']}}
                 }
                 self._apply_cookie_opts(ydl_opts)
 
@@ -1079,13 +1080,15 @@ class TurboDownloaderApp(ctk.CTk):
                     f_id = f.get("format_id")
                     proto = (f.get("protocol") or "").lower()
                     is_https = proto.startswith("http") and not ("m3u8" in proto or "hls" in proto)
+                    has_audio = f.get("acodec") not in (None, "none")
 
                     if h not in height_map:
                         height_map[h] = {
                             "height": h,
                             "fps": int(fps),
                             "format_id": f_id,
-                            "is_https": is_https
+                            "is_https": is_https,
+                            "has_audio": has_audio
                         }
                     else:
                         existing = height_map[h]
@@ -1095,7 +1098,8 @@ class TurboDownloaderApp(ctk.CTk):
                                 "height": h,
                                 "fps": int(fps),
                                 "format_id": f_id,
-                                "is_https": is_https
+                                "is_https": is_https,
+                                "has_audio": has_audio
                             }
                         # 2. Si ambos tienen el mismo tipo de protocolo, comparar fps
                         elif is_https == existing.get("is_https") and fps > existing["fps"]:
@@ -1103,7 +1107,8 @@ class TurboDownloaderApp(ctk.CTk):
                                 "height": h,
                                 "fps": int(fps),
                                 "format_id": f_id,
-                                "is_https": is_https
+                                "is_https": is_https,
+                                "has_audio": has_audio
                             }
 
                 # Construir opciones basadas en las resoluciones REALES del archivo
@@ -1132,7 +1137,8 @@ class TurboDownloaderApp(ctk.CTk):
                     new_options.append(label)
                     self.format_height_map[label] = {
                         "height": h,
-                        "format_id": info_h["format_id"]
+                        "format_id": info_h["format_id"],
+                        "has_audio": info_h.get("has_audio", False)
                     }
 
                 # Opciones de audio
@@ -1344,6 +1350,7 @@ class TurboDownloaderApp(ctk.CTk):
             "--retries", "3",
             "--fragment-retries", "3",
             "--no-colors",
+            "--extractor-args", "youtube:player_client=android,visionos,default",
             "--progress-template", "download:[PGBAR]%(progress._percent_str)s|%(progress._total_bytes_estimate_str,progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
         ])
 
@@ -1365,8 +1372,10 @@ class TurboDownloaderApp(ctk.CTk):
 
         # Constructor que garantiza que NINGUNA alternativa descargue únicamente audio
         # Cada rama vincula estrictamente [VIDEO] + [AUDIO] (m4a -> aac -> bestaudio)
-        def _pair_with_audio(v_expr):
-            return f"{v_expr}+bestaudio[ext=m4a]/{v_expr}+bestaudio[acodec^=mp4a]/{v_expr}+bestaudio"
+        def _pair_with_audio(v_expr, is_muxed=False):
+            if is_muxed:
+                return f"{v_expr}/{v_expr}+bestaudio"
+            return f"{v_expr}+bestaudio[ext=m4a]/{v_expr}+bestaudio[acodec^=mp4a]/{v_expr}+bestaudio/{v_expr}"
 
         # Asignar formato REAL seleccionado
         target_info = self.format_height_map.get(selected_option)
@@ -1378,15 +1387,16 @@ class TurboDownloaderApp(ctk.CTk):
         elif isinstance(target_info, dict):
             target_h = target_info.get("height")
             fmt_id = target_info.get("format_id")
+            has_audio = target_info.get("has_audio", False)
             # Selección estricta y compatible:
-            # 1. format_id detectado + audio (m4a -> aac -> bestaudio)
+            # 1. format_id detectado (si ya tiene audio va directo, si no se enlaza con audio)
             # 2. mejor video de esa altura directo por http + audio
             # 3. mejor video de esa altura + audio
             # 4. mejor video de esa altura o menor + audio
             # 5. cualquier combinación video+audio
             # 6. mejor flujo global
             branches = [
-                _pair_with_audio(fmt_id),
+                _pair_with_audio(fmt_id, is_muxed=has_audio),
                 _pair_with_audio(f"bestvideo[height={target_h}][protocol^=http]"),
                 _pair_with_audio(f"bestvideo[height={target_h}]"),
                 _pair_with_audio(f"bestvideo[height<={target_h}]"),
@@ -1716,6 +1726,9 @@ class TurboDownloaderApp(ctk.CTk):
             if returncode == 0:
                 self._safe_ui(self._on_download_complete, True, "¡Descarga finalizada con éxito!")
             else:
+                is_bot = any("sign in to confirm" in l.lower() or "not a bot" in l.lower() for l in error_output[-50:])
+                if is_bot:
+                    self._safe_ui(self._log, "\n[ANTI-BOT] YouTube solicitó verificación web. Si el bloqueo persiste, haz clic en el botón '🍪 Cookies' y vincula tu navegador habitual.")
                 self._safe_ui(self._on_download_complete, False, f"Proceso finalizado con código {returncode}. Revisa la consola.")
 
         except Exception as e:
